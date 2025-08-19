@@ -11,6 +11,7 @@ library(softImpute)
 library(stats)
 library(patchwork)
 library(clustMixType)
+library(cowplot)
 
 
 
@@ -34,7 +35,7 @@ View(Dash_Data)
 # Filtering for 'treatment' == 2 
 Dash_Data_treat <- Dash_Data %>%
   dplyr::filter(treatmnt == 2)
-View(Dash_Data_treat)
+#View(Dash_Data_treat)
 
 
 # Filtering features with 20% missing data
@@ -51,12 +52,21 @@ Dash_Data_filtered[setdiff(names(Dash_Data_filtered)[sapply(Dash_Data_filtered, 
 Dash_Data_filtered <- Dash_Data_filtered %>%
   mutate(across(where(is.character), as.factor))
 
-str(Dash_Data_filtered)
+#str(Dash_Data_filtered)
+
+numeric_cols <- setdiff(names(Dash_Data_filtered)[sapply(Dash_Data_filtered, is.numeric)], "treatmnt")
+
+# Median data imputation 
+Dash_Data_filtered[numeric_cols] <- lapply(Dash_Data_filtered[numeric_cols], function(x) {
+  x[is.nan(x)] <- NA                  # convert NaN to NA if any
+  x[is.na(x)] <- median(x, na.rm = TRUE)  # replace NAs with median
+  return(x)
+})
 ############################# Loading data + data processing #############################
 
 
 
-############################# Gower + PAM Example (handles NAs directly) #############################
+############################# Removing 0 variance + converting binary to factor #############################
 # Removing constant column (treatment)
 constant_cols <- sapply(Dash_Data_filtered, function(x) length(unique(x)) == 1)
 constant_cols
@@ -71,15 +81,52 @@ binary_numeric_cols <- sapply(Dash_Data_filtered_no_const, function(x) {
 
 # Convert binary numeric columns to factor
 Dash_Data_filtered_no_const[binary_numeric_cols] <- lapply(Dash_Data_filtered_no_const[binary_numeric_cols], as.factor)
+############################# Removing 0 variance + converting binary to factor #############################
 
+
+
+
+############################# Gower Distance + Silhouette Width #############################
 gower_dist <- daisy(Dash_Data_filtered_no_const, metric = "gower")
 
+# Finding optimal k clusters
+avg_sil <- sapply(2:10, function(k) {
+  pam_fit <- pam(gower_dist, k = k)
+  mean(pam_fit$silinfo$avg.width)
+})
+
+
+# Plotting average silhouette width
+k <- 2:10
+silhouette_gg <- ggplot(data = data.frame(k, avg_sil), aes(x = k, y = avg_sil)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = which.max(avg_sil) + 1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.10876340, lty = "dashed", color = "red") +
+  annotate("text", x = which.max(avg_sil) + 1 + 0.3, 
+           y = max(avg_sil) + 0.02, 
+           label = paste("Optimal k =", which.max(avg_sil) + 1), hjust = 0) +
+  labs(
+    x = "Number of Clusters (k)",
+    y = "Average Silhouette Width",
+    title = "Silhouette Method for Optimal k (Mixed Data)"
+  ) +
+  theme_minimal() +
+  theme(plot.margin = unit(c(1,1,1,1), "inches"),
+        plot.title = element_text(face = "bold"))
+
+silhouette_gg
+############################# Gower Distance + Silhouette Width #############################
+
+
+
+############################# PAM Clustering #############################
 # Apply PAM clustering
-pam_fit <- pam(gower_dist, k = 3)
+pam_fit <- pam(gower_dist, k = 2)
 
 # View cluster assignment
-Dash_Data_filtered$Cluster <- pam_fit$clustering
-View(Dash_Data_filtered)
+Dash_Data_filtered$pam_cluster <- pam_fit$clustering
+#View(Dash_Data_filtered)
 
 
 # Visualizing Gower clustering
@@ -95,109 +142,87 @@ mds_df <- data.frame(
 
 # Plot with ggplot2
 G_clustering <- ggplot(mds_df, aes(x = Dim1, y = Dim2, color = Cluster)) +
-  geom_point(alpha = 0.7, size = 3) +
-  labs(title = "PAM Clusters visualized via MDS", x = "Dimension 1", y = "Dimension 2") +
-  theme_minimal()
-############################# Gower + PAM Example (handles NAs directly) #############################
-
-
-
-
-############################# Imputation by median #############################
-#### Hmisc imputation did not work ####
-# Finding numeric columns with missing values
-# cols_to_impute <- names(Dash_Data_filtered)[sapply(Dash_Data_filtered, function(x) is.numeric(x) && any(is.na(x)))]
-# 
-# # Applying median imputation
-# Dash_Data_filtered[cols_to_impute] <- lapply(Dash_Data_filtered[cols_to_impute], function(col) {
-#   col <- as.numeric(col)  # strip any labels or attributes
-#   as.numeric(impute(col, median))
-# })
-
-
-numeric_data_imputed <- numeric_data %>%
-  mutate(across(everything(), ~ {
-    x <- .
-    x[!is.finite(x)] <- NA  # Convert Inf and NaN to NA
-    x[is.na(x)] <- median(x, na.rm = TRUE)
-    x
-  }))
-
-#### Finding optimal k clusters ####
-set.seed(123)
-wss <- sapply(1:10, function(k) {
-  kmeans(numeric_data_imputed[, -53], centers = k, nstart = 10)$tot.withinss
-})
-
-plot(1:10, wss, type = "b", pch = 19,
-     xlab = "Number of Clusters (k)",
-     ylab = "Total Within-Cluster Sum of Squares",
-     main = "Elbow Method for Optimal k")
-#### Finding optimal k clusters ####
-
-dist_matrix <- dist(numeric_data_imputed, method = "euclidean")
-hc <- hclust(dist_matrix, method = "ward.D2")
-plot(hc, labels = FALSE, hang = -1, main = "Hierarchical Clustering Dendrogram")
-rect.hclust(hc, k = 4, border = "red")
-
-clusters_hc_5 <- cutree(hc, k = 4)
-pca <- prcomp(numeric_data_imputed[,-53], scale. = FALSE)
-pca_df <- as.data.frame(pca$x[, 1:2])
-pca_df$Cluster <- factor(clusters_hc_5)
-
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
-  geom_point(size = 2) +
-  labs(title = "Hierarchical Clustering with 5 Clusters (PCA View)") +
-  theme_minimal()
-############################# Imputation by median #############################
-
-
-
-
-############################# k-prototypes clustering #############################
-Dash_Data_clean <- Dash_Data_filtered %>% dplyr::select(-HC2CONSX)
-
-# 2. Identify numeric columns for imputation
-numeric_cols <- names(Dash_Data_clean)[sapply(Dash_Data_clean, is.numeric)]
-
-# 3. Median impute numeric columns only
-Dash_Data_imputed <- Dash_Data_clean %>%
-  mutate(across(all_of(numeric_cols), ~ {
-    x <- .
-    x[is.nan(x)] <- NA
-    x[is.na(x)] <- median(x, na.rm = TRUE)
-    x
-  }))
-
-# 4. Run k-prototypes clustering (k = 5)
-set.seed(123)
-kpres <- kproto(Dash_Data_imputed, k = 4)
-
-# 5. Add cluster membership to the data
-Dash_Data_imputed$cluster <- factor(kpres$cluster)
-
-# PCA on numeric columns
-pca_res <- prcomp(dplyr::select(Dash_Data_imputed, all_of(numeric_cols)), scale. = FALSE)
-
-pca_df <- data.frame(pca_res$x[, 1:2], cluster = Dash_Data_imputed$cluster)
-
-# Plot clusters on first two PCs
-ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) +
   geom_point(alpha = 0.7, size = 2) +
-  labs(title = "K-Prototypes Clustering Visualization (k=5)",
-       x = "PC1",
-       y = "PC2",
-       color = "Cluster") +
-  theme_minimal()
+  stat_ellipse(aes(fill = Cluster), geom = "polygon", alpha = 0.2, show.legend = FALSE) +
+  labs(title = "PAM Clusters visualized via MDS", x = "Dimension 1", y = "Dimension 2") +
+  theme_classic() +
+  theme(plot.margin = unit(c(1,1,1,1), "inches"),
+        plot.title = element_text(face = "bold"))
+
+G_clustering
+############################# PAM Clustering #############################
+
+
+
 ############################# k-prototypes clustering #############################
+#Dash_Data_filtered_no_const <- Dash_Data_filtered_no_const %>% dplyr::select(-HC2CONSX)
+
+
+# Run k-prototypes clustering (k = 2)
+set.seed(123)
+kpres <- kproto(Dash_Data_filtered_no_const, k = 2)
+Dash_Data_filtered$k_proto_cluster <- factor(kpres$cluster)
+
+
+mds_fit <- cmdscale(gower_dist, k = 2)
+
+mds_df <- data.frame(
+  Dim1 = mds_fit[,1],
+  Dim2 = mds_fit[,2],
+  cluster = Dash_Data_filtered$k_proto_cluster
+)
+
+# Plot clusters
+k_prototype_clust <- ggplot(mds_df, aes(x = Dim1, y = Dim2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  stat_ellipse(aes(fill = cluster), geom = "polygon", alpha = 0.2, show.legend = FALSE) +
+  labs(title = "K-Prototypes Clustering Visualization via MDS",
+       x = "Dimension 1",
+       y = "Dimension 2",
+       color = "Cluster") +
+  theme_classic() +
+  theme(plot.margin = unit(c(1,1,1,1), "inches"),
+        plot.title = element_text(face = "bold"))
+
+k_prototype_clust
+############################# k-prototypes clustering #############################
+
+
+
+
+############################# Hierarchical Clustering #############################
+# dist_matrix <- dist(numeric_data_imputed, method = "euclidean")
+# hc <- hclust(dist_matrix, method = "ward.D2")
+# plot(hc, labels = FALSE, hang = -1, main = "Hierarchical Clustering Dendrogram")
+# rect.hclust(hc, k = 4, border = "red")
+# 
+# clusters_hc_5 <- cutree(hc, k = 4)
+# pca <- prcomp(numeric_data_imputed[,-53], scale. = FALSE)
+# pca_df <- as.data.frame(pca$x[, 1:2])
+# pca_df$Cluster <- factor(clusters_hc_5)
+# 
+# hieararchical_clust <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+#   geom_point(size = 2) +
+#   labs(title = "Hierarchical Clustering") +
+#   theme_classic() +
+#   theme(plot.margin = unit(c(1,1,1,1), "inches"),
+#         plot.title = element_text(face = "bold"))
+############################# Hierarchical Clustering #############################
+
+
+
 
 
 
 ############################# Merging all plots together #############################
-combined_plot <- G_clustering / LCA_clustering / softImpute_clustering  # vertically stack the 3 plots
+combined_plot <- silhouette_gg / G_clustering / k_prototype_clust  # vertically stack the 3 plots
+combined_plot_clusters_3 <- G_clustering + k_prototype_clust
 
 
-ggsave("combined_plots.pdf", plot = combined_plot, width = 8, height = 12)
+ggsave("C:/Users/loisr/OneDrive/Documents/Pediatrics Neonatology - Dr. M/Projects/Clinical_hydrocortisone/combined_plot.pdf",
+       plot = combined_plot, width = 8, height = 12)
+ggsave("C:/Users/loisr/OneDrive/Documents/Pediatrics Neonatology - Dr. M/Projects/Clinical_hydrocortisone/combined_plot_clusters_3.pdf",
+       plot = combined_plot_clusters_3, width = 12, height = 6)
 ############################# Merging all plots together #############################
 
 
